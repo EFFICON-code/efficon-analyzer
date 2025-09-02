@@ -1,6 +1,6 @@
-import os, io, re, json
+import os, io, re
 from typing import List, Tuple
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from werkzeug.utils import secure_filename
 
 # Lectura de documentos
@@ -10,15 +10,15 @@ from docx import Document as DocxDocument  # python-docx
 import numpy as np
 import requests
 
-# ===== Config =====
+# ================== Config ==================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-EMBED_MODEL = os.environ.get("text-embedding-3-large", "text-embedding-3-small")
-CHAT_MODEL  = os.environ.get("gpt-4o",  "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+CHAT_MODEL  = os.environ.get("CHAT_MODEL",  "gpt-4o-mini")
 
 ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
-# ===== Utilidades =====
+# ================ Utilidades ================
 def allowed_file(filename: str) -> bool:
     _, ext = os.path.splitext(filename.lower())
     return ext in ALLOWED_EXT
@@ -55,7 +55,10 @@ def normalize_spaces(s: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
-def chunk_text(text: str, max_chars: int = 2500, overlap: int = 200) -> List[str]:
+def chunk_text(text: str, max_chars: int = 2500, overlap: int = 250) -> List[str]:
+    """
+    Fragmenta por párrafos y une hasta ~max_chars; añade solape para contexto.
+    """
     paras = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
     chunks, buf, buf_len = [], [], 0
     for p in paras:
@@ -85,16 +88,27 @@ def cosine_sim_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-8)
     return np.dot(a_norm, b_norm.T)
 
-def build_prompt(instruction: str, selected_chunks: List[Tuple[int, str]]) -> List[dict]:
+def build_prompt_text(instruction: str, selected_chunks: List[Tuple[int, str]]) -> List[dict]:
+    """
+    Prompt para respuesta en TEXTO PLANO (sin JSON/Markdown).
+    """
     corpus = "\n\n".join([f"[Fragmento {i+1}]\n{c}" for i, (_, c) in enumerate(selected_chunks)])
     system = (
-        "Eres un analista experto en contratación pública del Ecuador y un auditor técnico.\n"
-        "Lee los fragmentos y responde a la instrucción con rigor, citando [Fragmento #].\n"
-        "Si se menciona proformas, arma una tabla comparativa y conclusión de valor por dinero.\n"
-        'Devuelve JSON válido con posibles campos: {"antecedentes":"", "analisis":"", "revision_proformas":{"criterios":[],"tabla":[],"conclusion":""}}'
+        "Eres un analista experto en contratación pública del Ecuador y auditor técnico."
+        "\nLee los fragmentos y cumple la instrucción con rigor y precisión."
+        "\nResponde en TEXTO PLANO, sin listas, sin títulos, sin Markdown."
+        "\nSi se mencionan proformas, integra comparación y conclusión de valor por dinero dentro del mismo texto."
+        "\nCita entre corchetes [Fragmento #] solo cuando aporte claridad."
     )
-    user = f"Instrucción:\n{instruction}\n\nFragmentos:\n{corpus}\n\nResponde SOLO en JSON."
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    user = (
+        f"Instrucción:\n{instruction}\n\n"
+        f"Fragmentos relevantes:\n{corpus}\n\n"
+        "Responde en TEXTO PLANO. No uses JSON ni listas."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
 def openai_chat(messages: List[dict]) -> str:
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
@@ -104,9 +118,9 @@ def openai_chat(messages: List[dict]) -> str:
     data = r.json()
     return data["choices"][0]["message"]["content"]
 
-# ===== App =====
+# ================== Flask App ==================
 app = Flask(__name__)
-# Límite de subida (ajústalo según tu caso; 100MB cubre 50 págs escaneadas)
+# Límite de subida (100 MB cubre PDFs escaneados ~50 págs). Ajusta si quieres.
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
 @app.route("/", methods=["GET"])
@@ -116,37 +130,35 @@ def health():
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     if not OPENAI_API_KEY:
-        return jsonify({"error": "OPENAI_API_KEY no configurada"}), 500
+        return "OPENAI_API_KEY no configurada", 500
 
-    instruction = request.form.get("instruction", "").strip()
+    instruction = (request.form.get("instruction") or "").strip()
     if not instruction:
-        return jsonify({"error": "Falta 'instruction'"}), 400
+        return "Falta 'instruction'", 400
 
-    if "files" not in request.files:
-        return jsonify({"error": "Sube al menos un archivo como 'files'"}), 400
+    # Preferimos 'file'; aceptamos 'files' por compatibilidad
+    upfile = request.files.get("file")
+    if not upfile and "files" in request.files:
+        try:
+            upfile = request.files.getlist("files")[0]
+        except Exception:
+            upfile = None
 
-    files = request.files.getlist("files")
-    docs_texts, meta = [], []
+    if not upfile:
+        return "Sube un archivo en el campo 'file'", 400
 
-    for f in files:
-        filename = secure_filename(f.filename or "archivo")
-        data = f.read()
-        if not allowed_file(filename):
-            return jsonify({"error": f"Extensión no permitida: {filename}"}), 400
-        text = extract_text_any(filename, data)
-        text = normalize_spaces(text)
-        docs_texts.append((filename, text))
-        meta.append({"filename": filename, "chars": len(text)})
+    filename = secure_filename(upfile.filename or "archivo")
+    data = upfile.read()
+    if not allowed_file(filename):
+        return f"Extensión no permitida: {filename}", 400
 
-    merged = []
-    for name, t in docs_texts:
-        if t:
-            merged.append(f"<<{name}>>\n{t}")
-    full_text = "\n\n".join(merged)
+    text = extract_text_any(filename, data)
+    text = normalize_spaces(text)
+    if len(text) < 50:
+        return "No se pudo extraer texto útil (¿PDF escaneado sin OCR?)", 422
 
-    if len(full_text) < 50:
-        return jsonify({"error": "No se pudo extraer texto útil (¿PDF escaneado sin OCR?)"}), 422
-
+    # Fragmentación y selección por similitud con la instrucción
+    full_text = f"<<{filename}>>\n{text}"
     chunks = chunk_text(full_text, max_chars=2500, overlap=250)
     chunk_vecs = openai_embed(chunks)
     instr_vec  = openai_embed([instruction])
@@ -156,21 +168,12 @@ def analyze():
     top_idx = np.argsort(-sims)[:K]
     selected = [(int(i), chunks[int(i)]) for i in top_idx]
 
-    messages = build_prompt(instruction, selected)
+    # Prompt para TEXTO PLANO
+    messages = build_prompt_text(instruction, selected)
     answer = openai_chat(messages)
 
-    try:
-        parsed = json.loads(answer)
-    except Exception:
-        parsed = {"raw": answer}
-
-    out = {
-        "status": "ok",
-        "meta": meta,
-        "used_chunks": sorted([int(i) for i in top_idx.tolist()]),
-        "result": parsed
-    }
-    return jsonify(out), 200
+    # Devuelve TEXTO PLANO directamente
+    return (answer or "").strip(), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
