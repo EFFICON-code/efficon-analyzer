@@ -1,5 +1,5 @@
 # main.py
-import os, io, re
+import os, io, re, base64
 from typing import List, Tuple
 from pathlib import Path
 
@@ -9,9 +9,11 @@ from flask import Flask, request, Response
 from werkzeug.utils import secure_filename
 
 # Lectura de documentos
-from pdfminer.high_level import extract_text as pdf_extract_text   # pdfminer.six
-from docx import Document as DocxDocument                          # python-docx
-
+from pdfminer_high_level import extract_text as pdf_extract_text  # <- si tu import se llama pdfminer.high_level, usa esa línea
+# from pdfminer.high_level import extract_text as pdf_extract_text
+from docx import Document as DocxDocument
+import pypdfium2 as pdfium
+from PIL import Image
 
 # ================== Config ==================
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", "")
@@ -19,14 +21,18 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_API_URL", os.environ.get("OPENAI_BASE_U
 EMBED_MODEL     = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 CHAT_MODEL      = os.environ.get("CHAT_MODEL",  "gpt-4o-mini")
 
-ALLOWED_EXT = {".pdf", ".docx", ".txt"}  # agrega más si lo necesitas
+# OCR opcional (si pones ENABLE_VISION_OCR=1 se fuerza siempre que no haya texto)
+ENABLE_VISION_OCR = os.environ.get("ENABLE_VISION_OCR", "1") in ("1", "true", "True")
+OCR_MAX_PAGES     = int(os.environ.get("OCR_MAX_PAGES", "20"))
+OCR_DPI           = int(os.environ.get("OCR_DPI", "160"))
 
+ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
-# ================== Utilidades ==================
+# ================== Utilidades HTTP ==================
 def text_response(s: str, status: int = 200) -> Response:
-    """Responde siempre texto plano UTF-8."""
     return Response((s or "").strip() + "\n", status=status, mimetype="text/plain; charset=utf-8")
 
+# ================== Utilidades de texto ==================
 def allowed_file(filename: str) -> bool:
     return Path(filename.lower()).suffix in ALLOWED_EXT
 
@@ -39,10 +45,7 @@ def read_txt_bytes(b: bytes) -> str:
 def read_docx_bytes(b: bytes) -> str:
     bio = io.BytesIO(b)
     doc = DocxDocument(bio)
-    parts = []
-    # Párrafos
-    parts.extend([p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()])
-    # (opcional) Tablas como texto simple
+    parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
     for t in doc.tables:
         for row in t.rows:
             parts.append(" | ".join([c.text.strip() for c in row.cells]))
@@ -69,7 +72,6 @@ def normalize_spaces(s: str) -> str:
     return s.strip()
 
 def chunk_text(text: str, max_chars: int = 2500, overlap: int = 250) -> List[str]:
-    """Fragmenta por párrafos y une hasta ~max_chars; añade solape para contexto."""
     paras = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
     chunks, buf, buf_len = [], [], 0
     for p in paras:
@@ -85,6 +87,7 @@ def chunk_text(text: str, max_chars: int = 2500, overlap: int = 250) -> List[str
         chunks.append("\n\n".join(buf))
     return chunks
 
+# ================== OpenAI wrappers ==================
 def openai_embed(texts: List[str]) -> np.ndarray:
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": EMBED_MODEL, "input": texts}
@@ -100,7 +103,6 @@ def cosine_sim_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.dot(a_norm, b_norm.T)
 
 def build_prompt_text(instruction: str, selected_chunks: List[Tuple[int, str]]) -> List[dict]:
-    """Prompt para respuesta en TEXTO PLANO (sin JSON/Markdown)."""
     corpus = "\n\n".join([f"[Fragmento {i+1}]\n{c}" for i, (_, c) in enumerate(selected_chunks)])
     system = (
         "Eres un analista experto en contratación pública del Ecuador y auditor técnico."
@@ -127,11 +129,41 @@ def openai_chat(messages: List[dict]) -> str:
     data = r.json()
     return data["choices"][0]["message"]["content"]
 
+# ================== OCR de respaldo (PDF imagen) ==================
+def pdf_to_images(pdf_bytes: bytes, dpi: int = OCR_DPI, max_pages: int = OCR_MAX_PAGES) -> List[bytes]:
+    """Renderiza páginas a JPEG en memoria (sin binarios del sistema)."""
+    imgs = []
+    pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
+    n = min(len(pdf), max_pages)
+    for i in range(n):
+        page = pdf[i]
+        pil = page.render(scale=dpi/72).to_pil()   # 72 dpi base
+        buf = io.BytesIO()
+        pil.save(buf, format="JPEG", quality=90)
+        imgs.append(buf.getvalue())
+    return imgs
+
+def ocr_images_with_openai(images: List[bytes]) -> str:
+    """Usa el modelo con visión para extraer texto plano de imágenes (en lotes)."""
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    out = []
+    batch = 4  # imágenes por request
+    for i in range(0, len(images), batch):
+        group = images[i:i+batch]
+        content = [{"type": "text",
+                    "text": "Extrae el texto legible de estas páginas en orden. Devuelve solo TEXTO PLANO, sin títulos ni listas."}]
+        for img in group:
+            b64 = base64.b64encode(img).decode("ascii")
+            content.append({"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        payload = {"model": CHAT_MODEL, "messages": [{"role": "user", "content": content}], "temperature": 0}
+        r = requests.post(f"{OPENAI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=180)
+        r.raise_for_status()
+        out.append(r.json()["choices"][0]["message"]["content"])
+    return "\n\n".join(out)
 
 # ================== Flask App ==================
 app = Flask(__name__)
-# Límite de subida (100 MB). Ajusta si lo necesitas.
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
 
 @app.route("/", methods=["GET"])
 def health():
@@ -142,28 +174,25 @@ def analyze():
     if not OPENAI_API_KEY:
         return text_response("OPENAI_API_KEY no configurada", 500)
 
-    # --- INSTRUCCIÓN: acepta form-data, cabecera y querystring ---
+    # --- Instrucción por form + header + query ---
     instruction = (
         (request.form.get("instruction") or "").strip()
         or (request.headers.get("X-Instruction") or "").strip()
         or (request.args.get("instruction") or "").strip()
     )
     if not instruction:
-        dbg = {
-            "content_type": request.content_type,
-            "form_keys": list(request.form.keys()),
-            "file_keys": list(request.files.keys()),
-        }
+        dbg = {"content_type": request.content_type,
+               "form_keys": list(request.form.keys()),
+               "file_keys": list(request.files.keys())}
         return text_response(f"Falta 'instruction' (no llegó en form, header ni query). Debug: {dbg}", 400)
 
-    # --- ARCHIVO: preferimos 'file'; aceptamos 'files' por compatibilidad ---
+    # --- Archivo ---
     upfile = request.files.get("file")
     if not upfile and "files" in request.files:
         try:
             upfile = request.files.getlist("files")[0]
         except Exception:
             upfile = None
-
     if not upfile or not upfile.filename:
         return text_response("Sube un archivo en el campo 'file'", 400)
 
@@ -175,19 +204,35 @@ def analyze():
     if not data:
         return text_response("Archivo vacío.", 400)
 
-    # --- Extracción de texto ---
+    # --- Extracción base ---
     try:
         text = extract_text_any(filename, data)
         text = normalize_spaces(text)
     except Exception as e:
         return text_response(f"Error extrayendo texto: {e}", 500)
 
-    if len(text) < 50:
-        return text_response("No se pudo extraer texto útil (¿PDF escaneado sin OCR?)", 422)
+    # --- Fallback OCR si PDF sin texto ---
+    if len(text) < 50 and Path(filename).suffix.lower() == ".pdf" and ENABLE_VISION_OCR:
+        try:
+            pages = pdf_to_images(data, dpi=OCR_DPI, max_pages=OCR_MAX_PAGES)
+            if not pages:
+                return text_response("PDF sin páginas para OCR.", 422)
+            ocr_text = ocr_images_with_openai(pages)
+            text = normalize_spaces(ocr_text)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 502
+            detail = e.response.text if e.response is not None else str(e)
+            return text_response(f"OCR (visión) falló ({status}): {detail}", 502)
+        except Exception as e:
+            return text_response(f"OCR (visión) falló: {e}", 502)
 
-    # --- Fragmentación y selección por similitud con la instrucción ---
+    if len(text) < 50:
+        return text_response("No se pudo extraer texto útil (¿PDF escaneado sin OCR?).", 422)
+
+    # --- RAG ligero (embeddings + top-K) ---
     full_text = f"<<{filename}>>\n{text}"
     chunks = chunk_text(full_text, max_chars=2500, overlap=250)
+
     try:
         chunk_vecs = openai_embed(chunks)
         instr_vec  = openai_embed([instruction])
@@ -203,7 +248,7 @@ def analyze():
     top_idx = np.argsort(-sims)[:K]
     selected = [(int(i), chunks[int(i)]) for i in top_idx]
 
-    # --- Chat (respuesta en TEXTO PLANO) ---
+    # --- Chat final (TEXTO PLANO) ---
     messages = build_prompt_text(instruction, selected)
     try:
         answer = openai_chat(messages)
@@ -216,8 +261,6 @@ def analyze():
 
     return text_response(answer or "", 200)
 
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
-    # host 0.0.0.0 para Railway / contenedores
     app.run(host="0.0.0.0", port=port)
