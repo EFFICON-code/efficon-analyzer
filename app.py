@@ -132,9 +132,20 @@ def analyze():
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY no configurada", 500
 
-    instruction = (request.form.get("instruction") or "").strip()
+    # --- INSTRUCCIÓN: acepta formulario, cabecera o querystring ---
+    instruction = (
+        (request.form.get("instruction") or "").strip()
+        or (request.headers.get("X-Instruction") or "").strip()
+        or (request.args.get("instruction") or "").strip()
+    )
     if not instruction:
-        return "Falta 'instruction'", 400
+        # Debug útil si vuelve a fallar
+        dbg = {
+            "content_type": request.content_type,
+            "form_keys": list(request.form.keys()),
+            "file_keys": list(request.files.keys()),
+        }
+        return (f"Falta 'instruction' (no llegó en form, header ni query). Debug: {dbg}", 400)
 
     # Preferimos 'file'; aceptamos 'files' por compatibilidad
     upfile = request.files.get("file")
