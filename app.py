@@ -24,7 +24,6 @@ OCR_DPI = int(os.environ.get("OCR_DPI", "160"))
 ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
 # ================== INICIALIZACIÓN DE LA APP FLASK ==================
-# CORRECCIÓN: Se crea el objeto 'app' aquí, ANTES de que se defina ninguna ruta.
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024 # 100 MB
 
@@ -35,7 +34,6 @@ def text_response(s: str, status: int = 200) -> Response:
 def allowed_file(filename: str) -> bool:
     return Path(filename.lower()).suffix in ALLOWED_EXT
 
-# ... (El resto de las funciones de ayuda van aquí)
 def read_txt_bytes(b: bytes) -> str:
     try:
         return b.decode("utf-8", errors="ignore")
@@ -193,8 +191,11 @@ def analyze():
     if not instruction:
         return text_response("Falta 'instruction'", 400)
     upfile = request.files.get("file")
-    if not upfile or not up.filename:
+    
+    # CORRECCIÓN CRÍTICA: Se corrigió el typo de 'up.filename' a 'upfile.filename'.
+    if not upfile or not upfile.filename:
         return text_response("Falta el archivo 'file'", 400)
+    
     filename = secure_filename(upfile.filename)
     if not allowed_file(filename):
         return text_response(f"Extensión no permitida: {Path(filename).suffix}", 400)
