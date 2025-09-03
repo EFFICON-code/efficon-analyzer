@@ -1,4 +1,4 @@
- # CORRECCIÓN: Se han eliminado caracteres invisibles (espacios de no ruptura)
+# CORRECCIÓN: Se han eliminado caracteres invisibles (espacios de no ruptura)
 # que causaban un error de sintaxis e impedían que la aplicación arrancara.
 import os, io, re, base64, time
 from typing import List, Tuple
@@ -18,7 +18,8 @@ from PIL import Image
 # ================== Config ==================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_API_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+# SOLUCIÓN: Se cambia al modelo de embeddings más compatible para evitar errores de permisos (403).
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-ada-002")
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
 
 # OCR opcional (si pones ENABLE_VISION_OCR=1 se fuerza siempre que no haya texto)
