@@ -18,8 +18,9 @@ from PIL import Image
 # ================== Config ==================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_API_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-# SOLUCIÓN: Se cambia al modelo de embeddings más compatible para evitar errores de permisos (403).
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-ada-002")
+# PRUEBA DEFINITIVA: Se "fuerza" el modelo correcto para ignorar cualquier
+# variable de entorno en el servidor que pueda estar causando conflictos.
+EMBED_MODEL = "text-embedding-ada-002"
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
 
 # OCR opcional (si pones ENABLE_VISION_OCR=1 se fuerza siempre que no haya texto)
