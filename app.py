@@ -30,6 +30,51 @@ OCR_DPI = int(os.environ.get("OCR_DPI", "160"))
 
 ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
+# ================== HERRAMIENTA DE DIAGNÓSTICO ==================
+@app.route("/api/check-models", methods=["GET"])
+def check_models():
+    """
+    Endpoint de diagnóstico para verificar a qué modelos de OpenAI
+    tiene acceso la API Key configurada desde el entorno del servidor.
+    """
+    if not OPENAI_API_KEY:
+        return text_response("OPENAI_API_KEY no configurada", 500)
+
+    print("--- Verificando modelos disponibles ---")
+    print(f"Usando base URL: {OPENAI_BASE_URL}")
+    print(f"Usando API Key que termina en: ...{OPENAI_API_KEY[-4:]}")
+
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        r = requests.get(f"{OPENAI_BASE_URL}/models", headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        
+        # Filtrar y mostrar solo los nombres de los modelos
+        model_names = sorted([model.get("id") for model in data.get("data", [])])
+        
+        response_text = "Modelos disponibles para esta API Key (desde este servidor):\n\n" + "\n".join(model_names)
+        
+        # Buscar específicamente los modelos que necesitamos
+        if "text-embedding-ada-002" in model_names:
+            response_text += "\n\n✅ 'text-embedding-ada-002' está disponible."
+        else:
+            response_text += "\n\n❌ 'text-embedding-ada-002' NO está disponible."
+            
+        if "gpt-4o-mini" in model_names:
+            response_text += "\n\n✅ 'gpt-4o-mini' está disponible."
+        else:
+            response_text += "\n\n❌ 'gpt-4o-mini' NO está disponible."
+
+        return text_response(response_text, 200)
+
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 502
+        detail = e.response.text if e.response is not None else str(e)
+        return text_response(f"Error al contactar OpenAI ({status}): {detail}", 502)
+    except Exception as e:
+        return text_response(f"Error inesperado: {e}", 502)
+
 # ================== Utilidades HTTP ==================
 def text_response(s: str, status: int = 200) -> Response:
     return Response((s or "").strip() + "\n", status=status, mimetype="text/plain; charset=utf-8")
