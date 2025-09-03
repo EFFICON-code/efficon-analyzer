@@ -1,5 +1,6 @@
-# main.py
-import os, io, re, base64
+ # CORRECCIÓN: Se han eliminado caracteres invisibles (espacios de no ruptura)
+# que causaban un error de sintaxis e impedían que la aplicación arrancara.
+import os, io, re, base64, time
 from typing import List, Tuple
 from pathlib import Path
 
@@ -9,22 +10,21 @@ from flask import Flask, request, Response
 from werkzeug.utils import secure_filename
 
 # Lectura de documentos
-from pdfminer_high_level import extract_text as pdf_extract_text  # <- si tu import se llama pdfminer.high_level, usa esa línea
-# from pdfminer.high_level import extract_text as pdf_extract_text
+from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
 import pypdfium2 as pdfium
 from PIL import Image
 
 # ================== Config ==================
-OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_API_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-EMBED_MODEL     = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL      = os.environ.get("CHAT_MODEL",  "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
 
 # OCR opcional (si pones ENABLE_VISION_OCR=1 se fuerza siempre que no haya texto)
 ENABLE_VISION_OCR = os.environ.get("ENABLE_VISION_OCR", "1") in ("1", "true", "True")
-OCR_MAX_PAGES     = int(os.environ.get("OCR_MAX_PAGES", "20"))
-OCR_DPI           = int(os.environ.get("OCR_DPI", "160"))
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "20"))
+OCR_DPI = int(os.environ.get("OCR_DPI", "160"))
 
 ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
@@ -131,30 +131,28 @@ def openai_chat(messages: List[dict]) -> str:
 
 # ================== OCR de respaldo (PDF imagen) ==================
 def pdf_to_images(pdf_bytes: bytes, dpi: int = OCR_DPI, max_pages: int = OCR_MAX_PAGES) -> List[bytes]:
-    """Renderiza páginas a JPEG en memoria (sin binarios del sistema)."""
     imgs = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
     n = min(len(pdf), max_pages)
     for i in range(n):
         page = pdf[i]
-        pil = page.render(scale=dpi/72).to_pil()   # 72 dpi base
+        pil = page.render(scale=dpi/72).to_pil() # 72 dpi base
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=90)
         imgs.append(buf.getvalue())
     return imgs
 
 def ocr_images_with_openai(images: List[bytes]) -> str:
-    """Usa el modelo con visión para extraer texto plano de imágenes (en lotes)."""
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     out = []
-    batch = 4  # imágenes por request
+    batch = 4 # imágenes por request
     for i in range(0, len(images), batch):
         group = images[i:i+batch]
         content = [{"type": "text",
                     "text": "Extrae el texto legible de estas páginas en orden. Devuelve solo TEXTO PLANO, sin títulos ni listas."}]
         for img in group:
             b64 = base64.b64encode(img).decode("ascii")
-            content.append({"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         payload = {"model": CHAT_MODEL, "messages": [{"role": "user", "content": content}], "temperature": 0}
         r = requests.post(f"{OPENAI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=180)
         r.raise_for_status()
@@ -163,7 +161,7 @@ def ocr_images_with_openai(images: List[bytes]) -> str:
 
 # ================== Flask App ==================
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024 # 100 MB
 
 @app.route("/", methods=["GET"])
 def health():
@@ -171,10 +169,13 @@ def health():
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
+    # LOGGING: Se añaden registros para depuración en producción
+    start_time = time.time()
+    print(">>> [0%] Petición recibida.")
+
     if not OPENAI_API_KEY:
         return text_response("OPENAI_API_KEY no configurada", 500)
 
-    # --- Instrucción por form + header + query ---
     instruction = (
         (request.form.get("instruction") or "").strip()
         or (request.headers.get("X-Instruction") or "").strip()
@@ -186,7 +187,6 @@ def analyze():
                "file_keys": list(request.files.keys())}
         return text_response(f"Falta 'instruction' (no llegó en form, header ni query). Debug: {dbg}", 400)
 
-    # --- Archivo ---
     upfile = request.files.get("file")
     if not upfile and "files" in request.files:
         try:
@@ -203,15 +203,15 @@ def analyze():
     data = upfile.read()
     if not data:
         return text_response("Archivo vacío.", 400)
+    
+    print(f">>> [10%] Archivo '{filename}' leído en memoria.")
 
-    # --- Extracción base ---
     try:
         text = extract_text_any(filename, data)
         text = normalize_spaces(text)
     except Exception as e:
         return text_response(f"Error extrayendo texto: {e}", 500)
 
-    # --- Fallback OCR si PDF sin texto ---
     if len(text) < 50 and Path(filename).suffix.lower() == ".pdf" and ENABLE_VISION_OCR:
         try:
             pages = pdf_to_images(data, dpi=OCR_DPI, max_pages=OCR_MAX_PAGES)
@@ -229,13 +229,20 @@ def analyze():
     if len(text) < 50:
         return text_response("No se pudo extraer texto útil (¿PDF escaneado sin OCR?).", 422)
 
-    # --- RAG ligero (embeddings + top-K) ---
+    print(f">>> [25%] Texto extraído. Longitud: {len(text)} caracteres.")
+    
     full_text = f"<<{filename}>>\n{text}"
     chunks = chunk_text(full_text, max_chars=2500, overlap=250)
 
     try:
-        chunk_vecs = openai_embed(chunks)
-        instr_vec  = openai_embed([instruction])
+        # OPTIMIZACIÓN: Se combinan las dos llamadas a la API de embeddings en una sola.
+        print(">>> [40%] Iniciando llamada a OpenAI Embeddings...")
+        all_texts_to_embed = chunks + [instruction]
+        all_vecs = openai_embed(all_texts_to_embed)
+        chunk_vecs = all_vecs[:-1]
+        instr_vec = all_vecs[-1:]
+        print(">>> [60%] Embeddings recibidos.")
+
         sims = cosine_sim_matrix(instr_vec, chunk_vecs).flatten()
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 502
@@ -247,21 +254,29 @@ def analyze():
     K = min(10, len(chunks))
     top_idx = np.argsort(-sims)[:K]
     selected = [(int(i), chunks[int(i)]) for i in top_idx]
+    
+    print(f">>> [75%] Top-{K} fragmentos seleccionados.")
 
-    # --- Chat final (TEXTO PLANO) ---
     messages = build_prompt_text(instruction, selected)
     try:
+        print(">>> [80%] Iniciando llamada a OpenAI Chat...")
         answer = openai_chat(messages)
+        print(">>> [99%] Respuesta del chat recibida.")
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 502
         detail = e.response.text if e.response is not None else str(e)
         return text_response(f"Error en chat OpenAI ({status}): {detail}", 502)
     except Exception as e:
         return text_response(f"Error inesperado en chat: {e}", 502)
-
+    
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f">>> [100%] Proceso completado en {total_time:.2f} segundos.")
+    
     return text_response(answer or "", 200)
 
+# Este bloque asegura que app.run() solo se ejecute en desarrollo local,
+# no en producción con Gunicorn, que era la causa del crash.
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
-    
