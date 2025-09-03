@@ -1,5 +1,3 @@
-# CORRECCIÓN: Se han eliminado caracteres invisibles (espacios de no ruptura)
-# que causaban un error de sintaxis e impedían que la aplicación arrancara.
 import os, io, re, base64, time
 from typing import List, Tuple
 from pathlib import Path
@@ -18,71 +16,26 @@ from PIL import Image
 # ================== Config ==================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_API_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-# PRUEBA DEFINITIVA: Se "fuerza" el modelo correcto para ignorar cualquier
-# variable de entorno en el servidor que pueda estar causando conflictos.
-EMBED_MODEL = "text-embedding-ada-002"
+EMBED_MODEL = "text-embedding-ada-002" # FORZADO para pruebas
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
-
-# OCR opcional (si pones ENABLE_VISION_OCR=1 se fuerza siempre que no haya texto)
 ENABLE_VISION_OCR = os.environ.get("ENABLE_VISION_OCR", "1") in ("1", "true", "True")
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "20"))
 OCR_DPI = int(os.environ.get("OCR_DPI", "160"))
-
 ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
-# ================== HERRAMIENTA DE DIAGNÓSTICO ==================
-@app.route("/api/check-models", methods=["GET"])
-def check_models():
-    """
-    Endpoint de diagnóstico para verificar a qué modelos de OpenAI
-    tiene acceso la API Key configurada desde el entorno del servidor.
-    """
-    if not OPENAI_API_KEY:
-        return text_response("OPENAI_API_KEY no configurada", 500)
+# ================== INICIALIZACIÓN DE LA APP FLASK ==================
+# CORRECCIÓN: Se crea el objeto 'app' aquí, ANTES de que se defina ninguna ruta.
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024 # 100 MB
 
-    print("--- Verificando modelos disponibles ---")
-    print(f"Usando base URL: {OPENAI_BASE_URL}")
-    print(f"Usando API Key que termina en: ...{OPENAI_API_KEY[-4:]}")
-
-    try:
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-        r = requests.get(f"{OPENAI_BASE_URL}/models", headers=headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        
-        # Filtrar y mostrar solo los nombres de los modelos
-        model_names = sorted([model.get("id") for model in data.get("data", [])])
-        
-        response_text = "Modelos disponibles para esta API Key (desde este servidor):\n\n" + "\n".join(model_names)
-        
-        # Buscar específicamente los modelos que necesitamos
-        if "text-embedding-ada-002" in model_names:
-            response_text += "\n\n✅ 'text-embedding-ada-002' está disponible."
-        else:
-            response_text += "\n\n❌ 'text-embedding-ada-002' NO está disponible."
-            
-        if "gpt-4o-mini" in model_names:
-            response_text += "\n\n✅ 'gpt-4o-mini' está disponible."
-        else:
-            response_text += "\n\n❌ 'gpt-4o-mini' NO está disponible."
-
-        return text_response(response_text, 200)
-
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 502
-        detail = e.response.text if e.response is not None else str(e)
-        return text_response(f"Error al contactar OpenAI ({status}): {detail}", 502)
-    except Exception as e:
-        return text_response(f"Error inesperado: {e}", 502)
-
-# ================== Utilidades HTTP ==================
+# ================== Utilidades HTTP y Texto ==================
 def text_response(s: str, status: int = 200) -> Response:
     return Response((s or "").strip() + "\n", status=status, mimetype="text/plain; charset=utf-8")
 
-# ================== Utilidades de texto ==================
 def allowed_file(filename: str) -> bool:
     return Path(filename.lower()).suffix in ALLOWED_EXT
 
+# ... (El resto de las funciones de ayuda van aquí)
 def read_txt_bytes(b: bytes) -> str:
     try:
         return b.decode("utf-8", errors="ignore")
@@ -134,7 +87,6 @@ def chunk_text(text: str, max_chars: int = 2500, overlap: int = 250) -> List[str
         chunks.append("\n\n".join(buf))
     return chunks
 
-# ================== OpenAI wrappers ==================
 def openai_embed(texts: List[str]) -> np.ndarray:
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": EMBED_MODEL, "input": texts}
@@ -176,14 +128,13 @@ def openai_chat(messages: List[dict]) -> str:
     data = r.json()
     return data["choices"][0]["message"]["content"]
 
-# ================== OCR de respaldo (PDF imagen) ==================
 def pdf_to_images(pdf_bytes: bytes, dpi: int = OCR_DPI, max_pages: int = OCR_MAX_PAGES) -> List[bytes]:
     imgs = []
     pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
     n = min(len(pdf), max_pages)
     for i in range(n):
         page = pdf[i]
-        pil = page.render(scale=dpi/72).to_pil() # 72 dpi base
+        pil = page.render(scale=dpi/72).to_pil()
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=90)
         imgs.append(buf.getvalue())
@@ -192,11 +143,10 @@ def pdf_to_images(pdf_bytes: bytes, dpi: int = OCR_DPI, max_pages: int = OCR_MAX
 def ocr_images_with_openai(images: List[bytes]) -> str:
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     out = []
-    batch = 4 # imágenes por request
+    batch = 4
     for i in range(0, len(images), batch):
         group = images[i:i+batch]
-        content = [{"type": "text",
-                    "text": "Extrae el texto legible de estas páginas en orden. Devuelve solo TEXTO PLANO, sin títulos ni listas."}]
+        content = [{"type": "text", "text": "Extrae el texto legible de estas páginas en orden. Devuelve solo TEXTO PLANO, sin títulos ni listas."}]
         for img in group:
             b64 = base64.b64encode(img).decode("ascii")
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
@@ -206,124 +156,96 @@ def ocr_images_with_openai(images: List[bytes]) -> str:
         out.append(r.json()["choices"][0]["message"]["content"])
     return "\n\n".join(out)
 
-# ================== Flask App ==================
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024 # 100 MB
-
+# ================== Rutas de la App ==================
 @app.route("/", methods=["GET"])
 def health():
     return text_response("✅ EFFICON Analyzer activo.")
 
-@app.route("/api/analyze", methods=["POST"])
-def analyze():
-    # LOGGING: Se añaden registros para depuración en producción
-    start_time = time.time()
-    print(">>> [0%] Petición recibida.")
-
+@app.route("/api/check-models", methods=["GET"])
+def check_models():
     if not OPENAI_API_KEY:
         return text_response("OPENAI_API_KEY no configurada", 500)
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        r = requests.get(f"{OPENAI_BASE_URL}/models", headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        model_names = sorted([model.get("id") for model in data.get("data", [])])
+        response_text = "Modelos disponibles para esta API Key:\n\n" + "\n".join(model_names)
+        if "text-embedding-ada-002" in model_names:
+            response_text += "\n\n✅ 'text-embedding-ada-002' está disponible."
+        else:
+            response_text += "\n\n❌ 'text-embedding-ada-002' NO está disponible."
+        return text_response(response_text, 200)
+    except Exception as e:
+        return text_response(f"Error al contactar OpenAI: {e}", 502)
 
+@app.route("/api/analyze", methods=["POST"])
+def analyze():
+    start_time = time.time()
+    print(">>> [0%] Petición de análisis recibida.")
+    if not OPENAI_API_KEY:
+        return text_response("OPENAI_API_KEY no configurada", 500)
     instruction = (
         (request.form.get("instruction") or "").strip()
-        or (request.headers.get("X-Instruction") or "").strip()
         or (request.args.get("instruction") or "").strip()
     )
     if not instruction:
-        dbg = {"content_type": request.content_type,
-               "form_keys": list(request.form.keys()),
-               "file_keys": list(request.files.keys())}
-        return text_response(f"Falta 'instruction' (no llegó en form, header ni query). Debug: {dbg}", 400)
-
+        return text_response("Falta 'instruction'", 400)
     upfile = request.files.get("file")
-    if not upfile and "files" in request.files:
-        try:
-            upfile = request.files.getlist("files")[0]
-        except Exception:
-            upfile = None
-    if not upfile or not upfile.filename:
-        return text_response("Sube un archivo en el campo 'file'", 400)
-
+    if not upfile or not up.filename:
+        return text_response("Falta el archivo 'file'", 400)
     filename = secure_filename(upfile.filename)
     if not allowed_file(filename):
-        return text_response(f"Extensión no permitida: {Path(filename).suffix}. Usa .pdf, .docx o .txt", 400)
-
+        return text_response(f"Extensión no permitida: {Path(filename).suffix}", 400)
     data = upfile.read()
     if not data:
         return text_response("Archivo vacío.", 400)
-    
-    print(f">>> [10%] Archivo '{filename}' leído en memoria.")
-
+    print(f">>> [10%] Archivo '{filename}' leído.")
     try:
         text = extract_text_any(filename, data)
         text = normalize_spaces(text)
     except Exception as e:
         return text_response(f"Error extrayendo texto: {e}", 500)
-
     if len(text) < 50 and Path(filename).suffix.lower() == ".pdf" and ENABLE_VISION_OCR:
         try:
-            pages = pdf_to_images(data, dpi=OCR_DPI, max_pages=OCR_MAX_PAGES)
-            if not pages:
-                return text_response("PDF sin páginas para OCR.", 422)
-            ocr_text = ocr_images_with_openai(pages)
-            text = normalize_spaces(ocr_text)
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else 502
-            detail = e.response.text if e.response is not None else str(e)
-            return text_response(f"OCR (visión) falló ({status}): {detail}", 502)
+            pages = pdf_to_images(data)
+            if pages:
+                ocr_text = ocr_images_with_openai(pages)
+                text = normalize_spaces(ocr_text)
         except Exception as e:
-            return text_response(f"OCR (visión) falló: {e}", 502)
-
+            return text_response(f"OCR falló: {e}", 502)
     if len(text) < 50:
-        return text_response("No se pudo extraer texto útil (¿PDF escaneado sin OCR?).", 422)
-
-    print(f">>> [25%] Texto extraído. Longitud: {len(text)} caracteres.")
-    
+        return text_response("No se pudo extraer texto útil.", 422)
+    print(f">>> [25%] Texto extraído. Longitud: {len(text)}.")
     full_text = f"<<{filename}>>\n{text}"
-    chunks = chunk_text(full_text, max_chars=2500, overlap=250)
-
+    chunks = chunk_text(full_text)
     try:
-        # OPTIMIZACIÓN: Se combinan las dos llamadas a la API de embeddings en una sola.
-        print(">>> [40%] Iniciando llamada a OpenAI Embeddings...")
+        print(">>> [40%] Iniciando embeddings...")
         all_texts_to_embed = chunks + [instruction]
         all_vecs = openai_embed(all_texts_to_embed)
         chunk_vecs = all_vecs[:-1]
         instr_vec = all_vecs[-1:]
         print(">>> [60%] Embeddings recibidos.")
-
         sims = cosine_sim_matrix(instr_vec, chunk_vecs).flatten()
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 502
-        detail = e.response.text if e.response is not None else str(e)
-        return text_response(f"Error en embeddings OpenAI ({status}): {detail}", 502)
     except Exception as e:
-        return text_response(f"Error inesperado en embeddings: {e}", 502)
-
+        return text_response(f"Error en embeddings OpenAI: {e}", 502)
     K = min(10, len(chunks))
     top_idx = np.argsort(-sims)[:K]
     selected = [(int(i), chunks[int(i)]) for i in top_idx]
-    
     print(f">>> [75%] Top-{K} fragmentos seleccionados.")
-
     messages = build_prompt_text(instruction, selected)
     try:
-        print(">>> [80%] Iniciando llamada a OpenAI Chat...")
+        print(">>> [80%] Iniciando chat...")
         answer = openai_chat(messages)
-        print(">>> [99%] Respuesta del chat recibida.")
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 502
-        detail = e.response.text if e.response is not None else str(e)
-        return text_response(f"Error en chat OpenAI ({status}): {detail}", 502)
+        print(">>> [99%] Respuesta recibida.")
     except Exception as e:
-        return text_response(f"Error inesperado en chat: {e}", 502)
-    
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f">>> [100%] Proceso completado en {total_time:.2f} segundos.")
-    
+        return text_response(f"Error en chat OpenAI: {e}", 502)
+    total_time = time.time() - start_time
+    print(f">>> [100%] Proceso completado en {total_time:.2f}s.")
     return text_response(answer or "", 200)
 
-# Este bloque asegura que app.run() solo se ejecute en desarrollo local,
-# no en producción con Gunicorn, que era la causa del crash.
+# ================== Arranque para Desarrollo Local ==================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
