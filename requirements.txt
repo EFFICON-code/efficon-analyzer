@@ -7,3 +7,4 @@ pdfminer.six==20231019
 pypdfium2==4.29.0
 Pillow==10.3.0
 Werkzeug==3.0.1
+psutil==5.9.8
